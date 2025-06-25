@@ -1,0 +1,115 @@
+import requests
+import time
+import pandas as pd
+import re
+import matplotlib.pyplot as plt
+from textblob import TextBlob
+
+def get_reviews(api_key, place_id):
+    details_endpoint = "https://maps.googleapis.com/maps/api/place/details/json"
+    params = {
+        "place_id": place_id,
+        "fields": "review",
+        "key": api_key
+    }
+    res = requests.get(details_endpoint, params=params)
+    reviews = res.json()["result"].get("reviews", [])
+    return reviews
+
+def get_franchise_place_ids(api_key, franchise_name, latitude, longitude, radius=15000):
+    endpoint = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "query": franchise_name,
+        "location": f"{latitude},{longitude}",
+        "radius": radius,
+        "type": "restaurant",
+        "key": api_key
+    }
+
+    all_places = []
+
+    while True:
+        response = requests.get(endpoint, params=params)
+        data = response.json()
+
+        for result in data.get("results", []):
+            all_places.append({
+                "name": result.get("name"),
+                "address": result.get("formatted_address"),
+                "place_id": result.get("place_id")
+            })
+
+        # Handle pagination
+        if "next_page_token" in data:
+            next_token = data["next_page_token"]
+            time.sleep(2)  # Delay needed before next_page_token becomes valid
+            params = {
+                "pagetoken": next_token,
+                "key": api_key
+            }
+        else:
+            break
+
+    return all_places
+
+
+# Example usage
+api_key = "AIzaSyBh_nFLjiidObDjfJwojNXH79Jhqtn_bKo"  # Replace with your key
+franchise_name = "Subway"
+latitude = 40.4406    # Pittsburgh latitude
+longitude = -79.9959  # Pittsburgh longitude
+
+locations = get_franchise_place_ids(api_key, franchise_name, latitude, longitude)
+
+all_reviews_data = []
+
+# Print the results
+for loc in locations:
+    name = loc['name']
+    address = loc['address']
+    place_id = loc['place_id']
+
+    reviews = get_reviews(api_key, place_id)
+    for r in reviews:
+        all_reviews_data.append({
+            "name": name,
+            "address": address,
+            "place_id": place_id,
+            "rating": r.get("rating"),
+            "review_text": r.get("text")
+        })
+
+    # Convert to DataFrame
+    df_reviews = pd.DataFrame(all_reviews_data)
+    
+    # Show the table
+    df_reviews.head()
+
+def clean_review(text):
+    text = text.lower()
+    text = re.sub(r"http\S+", "", text)  # remove URLs
+    text = re.sub(r"[^\w\s]", "", text)  # remove punctuation
+    return text
+
+df_reviews['cleaned_review'] = df_reviews['review_text'].apply(clean_review)
+
+!pip install transformers --quiet
+
+from transformers import pipeline
+sentiment_pipeline = pipeline("sentiment-analysis")
+
+df_reviews['sentiment'] = df_reviews['cleaned_review'].apply(lambda x: sentiment_pipeline(x)[0]['label'])
+
+score_map = {'POSITIVE': 1, 'NEUTRAL': 0, 'NEGATIVE': -1}
+df_reviews['sentiment_score'] = df_reviews['sentiment'].map(score_map)
+print(df_reviews)
+
+
+location_scores = df_reviews.groupby(['place_id', 'address']).agg(
+    review_count=('sentiment_score', 'count'),
+    avg_sentiment_score=('sentiment_score', 'mean')
+).reset_index()
+
+location_scores.plot(kind='bar', x='address', y='avg_sentiment_score')
+plt.title('Average Sentiment Score per Outlet')
+plt.ylabel('Score (-1 to +1)')
